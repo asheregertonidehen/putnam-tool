@@ -149,25 +149,51 @@ class TableParser(HTMLParser):
         self._row = None
         self._cell = None
 
-    def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self._table = []
-        elif tag == "tr" and self._table is not None:
-            self._row = []
-        elif tag in ("td", "th") and self._row is not None:
-            self._cell = []
+    # older pages in the archive leave <td> and <tr> unclosed, so every
+    # boundary closes whatever is still open rather than trusting end tags.
 
-    def handle_endtag(self, tag):
-        if tag in ("td", "th") and self._cell is not None:
+    def _close_cell(self):
+        if self._cell is not None:
             text = re.sub(r"\s+", " ", "".join(self._cell)).strip()
             self._row.append(html.unescape(text))
             self._cell = None
-        elif tag == "tr" and self._row is not None:
+
+    def _close_row(self):
+        self._close_cell()
+        if self._row is not None:
             self._table.append(self._row)
             self._row = None
-        elif tag == "table" and self._table is not None:
+
+    def _close_table(self):
+        self._close_row()
+        if self._table is not None:
             self.tables.append(self._table)
             self._table = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._close_table()
+            self._table = []
+        elif tag == "tr" and self._table is not None:
+            self._close_row()
+            self._row = []
+        elif tag in ("td", "th") and self._table is not None:
+            self._close_cell()
+            if self._row is None:
+                self._row = []
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th"):
+            self._close_cell()
+        elif tag == "tr":
+            self._close_row()
+        elif tag == "table":
+            self._close_table()
+
+    def close(self):
+        super().close()
+        self._close_table()
 
     def handle_data(self, data):
         if self._cell is not None:
@@ -184,6 +210,7 @@ def parse_stats(html_text):
 
     parser = TableParser()
     parser.feed(html_text)
+    parser.close()
 
     for table in parser.tables:
         # find the header row that names at least 12 problems

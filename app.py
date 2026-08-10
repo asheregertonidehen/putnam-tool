@@ -44,6 +44,8 @@ def tex_to_html(tex):
     out = re.sub(r"\\item\b", "\n* ", out)
     out = re.sub(r"\\(?:emph|textit)\{([^{}]*)\}", r"<em>\1</em>", out)
     out = re.sub(r"\\textbf\{([^{}]*)\}", r"<strong>\1</strong>", out)
+    out = re.sub(r"\\(?:noindent|smallskip|medskip|bigskip|par)\b", "", out)
+    out = re.sub(r"\\label\{[^{}]*\}", "", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 

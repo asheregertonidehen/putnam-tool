@@ -4,7 +4,7 @@
     export OPENROUTER_API_KEY=sk-or-...
     python3 classify.py                 # every unclassified problem
     python3 classify.py --year 2019     # just one year
-    python3 classify.py --limit 5 --dry-run
+    python3 classify.py --smoke --dry-run   # 15-problem end-to-end check
 
 Only problems that carry both a problem statement and a solution are eligible;
 the solution is what makes the second pass more than a guess at the wording.
@@ -31,6 +31,7 @@ Stdlib only -- the HTTP call is urllib.
 import argparse
 import json
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -105,6 +106,27 @@ def eligible(con, year=None, redo=False, limit=None):
         sql.append("LIMIT ?")
         args.append(limit)
     return [dict(r) for r in con.execute("\n".join(sql), args)]
+
+
+SMOKE_HEAD = 5
+SMOKE_RANDOM = 10
+
+
+def smoke_sample(con, seed=None):
+    """The first few problems plus a random spread -- one cheap end-to-end check.
+
+    The head of the list is 2025 A1-A5, which is where the LaTeX-in-JSON
+    failures showed up, so a smoke run re-covers them every time.  The random
+    tail is drawn from every other eligible problem, and drawn afresh unless a
+    seed pins it, so repeated runs keep meeting new material.  Already
+    classified problems stay in the pool: a smoke test should test the same
+    thing twice.
+    """
+    pool = eligible(con, redo=True)
+    head = pool[:SMOKE_HEAD]
+    rest = pool[SMOKE_HEAD:]
+    tail = random.Random(seed).sample(rest, min(SMOKE_RANDOM, len(rest)))
+    return head + sorted(tail, key=lambda p: (-p["year"], p["session"], p["number"]))
 
 
 def save(con, problem_id, record):
@@ -504,6 +526,10 @@ def main():
     ap.add_argument("--model", default=MODEL, help=f"OpenRouter model (default {MODEL})")
     ap.add_argument("--redo", action="store_true", help="reclassify already-done problems")
     ap.add_argument("--dry-run", action="store_true", help="print results, write nothing")
+    ap.add_argument("--smoke", action="store_true",
+                    help=f"end-to-end check: the first {SMOKE_HEAD} problems plus "
+                         f"{SMOKE_RANDOM} random others (ignores --year/--limit)")
+    ap.add_argument("--seed", type=int, help="pin --smoke's random pick")
     ap.add_argument("--stats", action="store_true",
                     help="print the A1/A2/B1/B2 domain table and exit")
     ap.add_argument("--db", type=Path, default=DB_PATH)
@@ -522,11 +548,17 @@ def main():
     if not api_key:
         sys.exit("set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys)")
 
-    todo = eligible(con, year=args.year, redo=args.redo, limit=args.limit)
+    if args.smoke:
+        todo = smoke_sample(con, args.seed)
+    else:
+        todo = eligible(con, year=args.year, redo=args.redo, limit=args.limit)
     if not todo:
         print("nothing to classify")
         return
 
+    if args.smoke:
+        picks = " ".join(f"{p['year']}{p['session']}{p['number']}" for p in todo)
+        print(f"smoke test: {picks}")
     print(f"classifying {len(todo)} problems with {args.model}")
     done = failed = 0
     fresh = []

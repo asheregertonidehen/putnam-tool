@@ -19,15 +19,15 @@ TAXONOMY = {
     "Algebra": {
         "Identities and Inequalities": [
             "Algebraic Identities",
-            "x^2 >= 0",
-            "The Cauchy-Schwarz Inequality",
+            "x^2 ≥ 0",
+            "The Cauchy–Schwarz Inequality",
             "The Triangle Inequality",
-            "The Arithmetic Mean-Geometric Mean Inequality",
+            "The Arithmetic Mean–Geometric Mean Inequality",
             "Sturm's Principle",
             "Other Inequalities",
         ],
         "Polynomials": [
-            "Viete's Relations",
+            "Viète's Relations",
             "The Derivative of a Polynomial",
             "The Location of the Zeros of a Polynomial",
             "Irreducible Polynomials",
@@ -40,7 +40,7 @@ TAXONOMY = {
             "Systems of Linear Equations",
             "Vector Spaces, Linear Combinations of Vectors, Bases",
             "Linear Transformations, Eigenvalues, Eigenvectors",
-            "The Cayley-Hamilton and Perron-Frobenius Theorems",
+            "The Cayley–Hamilton and Perron–Frobenius Theorems",
         ],
         "Abstract Algebra": [
             "Binary Operations",
@@ -129,7 +129,7 @@ TAXONOMY = {
             "Combinatorial Identities",
             "Generating Functions",
             "Counting Strategies",
-            "The Inclusion-Exclusion Principle",
+            "The Inclusion–Exclusion Principle",
         ],
         "Probability": [
             "Equally Likely Cases",

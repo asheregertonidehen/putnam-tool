@@ -453,74 +453,114 @@ def normalize_label(text):
 # --------------------------------------------------------------------------
 
 # A1, A2, B1 and B2 are the two openers of each session: the problems most
-# people actually reach.  Pooling all four says which domains a competitor is
-# most likely to meet early, which is the useful thing to study by.
+# people actually reach.  Pooling all four says which topics and domains a
+# competitor is most likely to meet early, which is the useful thing to study
+# by, and the sub-domain rankings say what to study within them.
 ENTRY_POSITIONS = ("A1", "A2", "B1", "B2")
 
+TOP_SUBDOMAINS = 3
 
-def entry_domain_stats(con):
-    """A1+A2+B1+B2 counts per domain, most common first, with confidences."""
-    return domain_stats(con.execute(
-        "SELECT t.topic, t.domain, t.confidence "
+
+def entry_rows(con):
+    """One row per classified A1/A2/B1/B2 problem, shaped like a fresh record."""
+    rows = con.execute(
+        "SELECT t.topic, t.domain, t.subdomains, t.confidence "
         "FROM problem_topics t JOIN problems p ON p.id = t.problem_id "
         "WHERE p.session || p.number IN (?, ?, ?, ?)",
         ENTRY_POSITIONS,
-    ).fetchall())
+    ).fetchall()
+    return [{"topic": r["topic"], "domain": r["domain"],
+             "subdomains": json.loads(r["subdomains"]), "confidence": r["confidence"]}
+            for r in rows]
 
 
-def domain_stats(rows):
-    """Aggregate {topic, domain, confidence} rows into the ranked table."""
+def tally(rows, key):
+    """Rank rows by how often `key` occurs, ties broken by confidence."""
     buckets = {}
     for row in rows:
-        bucket = buckets.setdefault(row["domain"], {"topic": row["topic"], "confidences": []})
-        bucket["confidences"].append(row["confidence"])
-
-    out = []
-    for domain, bucket in buckets.items():
-        confidences = bucket["confidences"]
-        out.append({
-            "domain": domain,
-            "topic": bucket["topic"],
-            "count": len(confidences),
-            "mean_confidence": sum(confidences) / len(confidences),
-            "min_confidence": min(confidences),
-            "max_confidence": max(confidences),
-        })
-    out.sort(key=lambda r: (-r["count"], -r["mean_confidence"], r["domain"]))
+        buckets.setdefault(key(row), []).append(row["confidence"])
+    out = [{"name": name, "count": len(cs), "mean": sum(cs) / len(cs),
+            "low": min(cs), "high": max(cs)}
+           for name, cs in buckets.items()]
+    out.sort(key=lambda r: (-r["count"], -r["mean"], r["name"]))
     return out
 
 
-def format_entry_stats(stats, classified=None, scope="the database"):
-    """Render the table.  `classified` is how many problems were classified in
-    all, which is the larger number the table is drawn from: only the four
-    entry positions are counted here, so the two rarely agree."""
-    total = sum(r["count"] for r in stats)
-    if classified is None:
-        classified = total
-    tallied = f"{total} of {classified} problems classified in {scope}"
+def subdomain_tally(rows):
+    """{domain: ranked sub-domains}.  A problem tagged with two or three
+    sub-domains counts once under each of them."""
+    spread = {}
+    for row in rows:
+        for sub in row["subdomains"]:
+            spread.setdefault(row["domain"], []).append(
+                {"sub": sub, "confidence": row["confidence"]})
+    return {domain: tally(rs, lambda r: r["sub"]) for domain, rs in spread.items()}
 
-    if not stats:
-        return f"A1 + A2 + B1 + B2 by domain\n{tallied} sit in those four positions"
 
-    width = max(len(r["domain"]) for r in stats)
-    lines = [
-        "A1 + A2 + B1 + B2 by domain",
-        f"{tallied} sit in those four positions",
-        "",
-        f"{'domain'.ljust(width)}  {'count':>5}  {'share':>6}   confidence (mean, range)",
-        "-" * (width + 44),
-    ]
+def rank_table(label, stats, total, subs=None):
+    """A count / share / confidence table, optionally with each row's top
+    sub-domains indented underneath it."""
+    width = max([len(label)] + [len(r["name"]) for r in stats])
+    rule = "-" * (width + 44)
+    lines = [f"{label.ljust(width)}  {'count':>5}  {'share':>6}   confidence (mean, range)",
+             rule]
     for row in stats:
         lines.append(
-            f"{row['domain'].ljust(width)}  {row['count']:5d}  {row['count'] / total:6.1%}"
-            f"   {row['mean_confidence']:.2f}"
-            f"  ({row['min_confidence']:.2f}-{row['max_confidence']:.2f})"
+            f"{row['name'].ljust(width)}  {row['count']:5d}  {row['count'] / total:6.1%}"
+            f"   {row['mean']:.2f}  ({row['low']:.2f}-{row['high']:.2f})"
         )
-    lines.append("-" * (width + 44))
-    every = [c for r in stats for c in [r["mean_confidence"]] * r["count"]]
-    lines.append(f"{'total'.ljust(width)}  {total:5d}  {1:6.1%}"
-                 f"   {sum(every) / total:.2f}")
+        for pick in (subs or {}).get(row["name"], [])[:TOP_SUBDOMAINS]:
+            lines.append(f"    {pick['name']} ({pick['count']})")
+    lines.append(rule)
+    mean = sum(r["mean"] * r["count"] for r in stats) / total
+    lines.append(f"{'total'.ljust(width)}  {total:5d}  {1:6.1%}   {mean:.2f}")
     return "\n".join(lines)
+
+
+def plural(count, noun):
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def subdomain_section(domains, subs):
+    """Every sub-domain of every domain, ranked, domains in the same order."""
+    lines = ["Every sub-domain, by domain",
+             "a problem tagged with several sub-domains is counted under each,",
+             "so these run ahead of the problem counts above",
+             ""]
+    for row in domains:
+        ranked = subs.get(row["name"], [])
+        lines.append(f"{row['name']}  ({plural(row['count'], 'problem')}, "
+                     f"{plural(len(ranked), 'sub-domain')} used)")
+        for sub in ranked:
+            lines.append(f"  {sub['count']:4d}  {sub['mean']:.2f}  {sub['name']}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def format_entry_stats(rows, classified=None, scope="the database"):
+    """The whole summary.  `classified` is how many problems were classified in
+    all, which is the larger number these tables are drawn from: only the four
+    entry positions are counted here, so the two rarely agree."""
+    total = len(rows)
+    if classified is None:
+        classified = total
+    header = ["A1 + A2 + B1 + B2",
+              f"{total} of {classified} problems classified in {scope} "
+              f"sit in those four positions"]
+    if not rows:
+        return "\n".join(header)
+
+    topics = tally(rows, lambda r: r["topic"])
+    domains = tally(rows, lambda r: r["domain"])
+    subs = subdomain_tally(rows)
+
+    return "\n\n".join([
+        "\n".join(header),
+        rank_table("topic", topics, total),
+        f"by domain, with its {TOP_SUBDOMAINS} most common sub-domains\n"
+        + rank_table("domain", domains, total, subs),
+        subdomain_section(domains, subs),
+    ])
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +594,7 @@ def main():
     con = connect(args.db)
     if args.stats:
         classified = con.execute("SELECT COUNT(*) FROM problem_topics").fetchone()[0]
-        print(format_entry_stats(entry_domain_stats(con), classified))
+        print(format_entry_stats(entry_rows(con), classified))
         con.close()
         return
 
@@ -598,10 +638,10 @@ def main():
     print()
     # A dry run writes nothing, so its table has to come from this run alone.
     if args.dry_run:
-        print(format_entry_stats(domain_stats(fresh), done, "this run"))
+        print(format_entry_stats(fresh, done, "this run"))
     else:
         classified = con.execute("SELECT COUNT(*) FROM problem_topics").fetchone()[0]
-        print(format_entry_stats(entry_domain_stats(con), classified))
+        print(format_entry_stats(entry_rows(con), classified))
     con.close()
 
 

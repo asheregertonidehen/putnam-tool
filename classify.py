@@ -490,23 +490,36 @@ def domain_stats(rows):
     return out
 
 
-def format_entry_stats(stats):
-    if not stats:
-        return "no classified A1/A2/B1/B2 problems yet"
-
+def format_entry_stats(stats, classified=None, scope="the database"):
+    """Render the table.  `classified` is how many problems were classified in
+    all, which is the larger number the table is drawn from: only the four
+    entry positions are counted here, so the two rarely agree."""
     total = sum(r["count"] for r in stats)
+    if classified is None:
+        classified = total
+    tallied = f"{total} of {classified} problems classified in {scope}"
+
+    if not stats:
+        return f"A1 + A2 + B1 + B2 by domain\n{tallied} sit in those four positions"
+
     width = max(len(r["domain"]) for r in stats)
     lines = [
-        f"A1 + A2 + B1 + B2 by domain  ({total} problems classified)",
-        f"{'domain'.ljust(width)}  count   share   confidence (mean, range)",
+        "A1 + A2 + B1 + B2 by domain",
+        f"{tallied} sit in those four positions",
+        "",
+        f"{'domain'.ljust(width)}  {'count':>5}  {'share':>6}   confidence (mean, range)",
         "-" * (width + 44),
     ]
     for row in stats:
         lines.append(
-            f"{row['domain'].ljust(width)}  {row['count']:5d}  {row['count'] / total:5.1%}"
+            f"{row['domain'].ljust(width)}  {row['count']:5d}  {row['count'] / total:6.1%}"
             f"   {row['mean_confidence']:.2f}"
             f"  ({row['min_confidence']:.2f}-{row['max_confidence']:.2f})"
         )
+    lines.append("-" * (width + 44))
+    every = [c for r in stats for c in [r["mean_confidence"]] * r["count"]]
+    lines.append(f"{'total'.ljust(width)}  {total:5d}  {1:6.1%}"
+                 f"   {sum(every) / total:.2f}")
     return "\n".join(lines)
 
 
@@ -540,7 +553,8 @@ def main():
 
     con = connect(args.db)
     if args.stats:
-        print(format_entry_stats(entry_domain_stats(con)))
+        classified = con.execute("SELECT COUNT(*) FROM problem_topics").fetchone()[0]
+        print(format_entry_stats(entry_domain_stats(con), classified))
         con.close()
         return
 
@@ -583,8 +597,11 @@ def main():
           + ("  (dry run -- nothing written)" if args.dry_run else ""))
     print()
     # A dry run writes nothing, so its table has to come from this run alone.
-    stats = domain_stats(fresh) if args.dry_run else entry_domain_stats(con)
-    print(format_entry_stats(stats))
+    if args.dry_run:
+        print(format_entry_stats(domain_stats(fresh), done, "this run"))
+    else:
+        classified = con.execute("SELECT COUNT(*) FROM problem_topics").fetchone()[0]
+        print(format_entry_stats(entry_domain_stats(con), classified))
     con.close()
 
 

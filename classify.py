@@ -31,6 +31,7 @@ Stdlib only -- the HTTP call is urllib.
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -158,9 +159,11 @@ def ask(system, user, api_key, model=MODEL):
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 body = json.load(resp)
             text = body["choices"][0]["message"]["content"]
-            return json.loads(strip_fence(text))
+            return loads_lenient(text)
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, TimeoutError) as e:
             last = e
+            if isinstance(e, json.JSONDecodeError):
+                last = json.JSONDecodeError(f"{e.msg} in: {text[:300]!r}", e.doc, e.pos)
             if attempt == MAX_RETRIES - 1:
                 break
             time.sleep(2 ** attempt)
@@ -173,6 +176,78 @@ def strip_fence(text):
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0]
     return text.strip()
+
+
+# A model describing a Putnam problem reaches for LaTeX, and LaTeX is nothing
+# but backslashes.  JSON has opinions about those: "\pi" and "\{" are hard
+# parse errors, while "\frac" and "\binom" quietly decode to a formfeed and a
+# backspace.  The prompts ask for plain prose to avoid the whole business, but
+# a reply that slips through should not cost a problem, so mis-escaped JSON is
+# repaired rather than retried.
+
+CONTROL_JUNK = "\b\f\v\x07"          # what \binom, \frac, \vec, \alpha decode to
+JSON_ESCAPES = '"\\/bfnrtu'
+
+
+def loads_lenient(text):
+    """json.loads, but tolerant of raw LaTeX backslashes inside the strings."""
+    text = strip_fence(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(repair_escapes(text))
+    # Parsed, but a swallowed \frac leaves a control character behind.
+    return json.loads(repair_escapes(text)) if has_control_junk(data) else data
+
+
+def has_control_junk(value):
+    if isinstance(value, str):
+        return any(ch in value for ch in CONTROL_JUNK)
+    if isinstance(value, dict):
+        return any(has_control_junk(v) for v in value.values())
+    if isinstance(value, list):
+        return any(has_control_junk(v) for v in value)
+    return False
+
+
+def repair_escapes(text):
+    """Double every backslash inside a JSON string that isn't a real escape.
+
+    Ambiguous one-letter escapes (\n, \t, \b, \f, \r) are read as LaTeX when a
+    letter follows -- "\theta" and "\nabla" are far likelier here than a tab or
+    a newline mid-sentence, and a stray literal beats a mangled word.
+    """
+    out = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if not in_string:
+            in_string = ch == '"'
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_string = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", text[i + 2:i + 6] or ""):
+            out.append(text[i:i + 6])
+            i += 6
+        elif nxt in JSON_ESCAPES and not (nxt in "bfnrt" and text[i + 2:i + 3].isalpha()):
+            out.append(text[i:i + 2])
+            i += 2
+        else:
+            out.append("\\\\")            # a literal backslash the model meant to keep
+            i += 1
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -195,9 +270,13 @@ theorems, transforms, structures, or estimates it uses), not just the surface \
 wording of the statement. Prefer the technique that does the real work over \
 incidental steps.
 
+Write the description as plain prose, and keep LaTeX out of it: no backslash \
+commands, no dollar signs. Write pi, sin x, x^2, n choose k, the integral of f \
+over [0,1]. Naming the technique is what matters, not reproducing the formula.
+
 Reply with JSON only:
 {{"topic": "<exactly one topic from the list>",
-  "description": "<3-4 sentences>"}}"""
+  "description": "<3-4 sentences, plain prose, no LaTeX>"}}"""
 
 
 def represent(problem, api_key, model=MODEL):
@@ -255,6 +334,9 @@ means less confidence, not more.
 
 For the whole taxonomy in context:
 {outline}
+
+Write the reasoning as plain prose with no LaTeX: no backslash commands, no \
+dollar signs.
 
 Reply with JSON only:
 {{"domain": "<one domain>",

@@ -21,6 +21,10 @@ The two passes are separate API calls with separate prompts, so the second one
 reasons over the representation rather than re-deriving it.  Everything lands
 in the problem_topics table; run again to fill in whatever failed.
 
+Every run finishes by printing the summary table: A1, A2, B1 and B2 pooled
+together and counted by domain, most common domain first, with the confidence
+the model reported for those calls.  `--stats` prints just that table.
+
 Stdlib only -- the HTTP call is urllib.
 """
 
@@ -341,6 +345,68 @@ def normalize_label(text):
 
 
 # --------------------------------------------------------------------------
+# statistics -- where the entry-level problems live
+# --------------------------------------------------------------------------
+
+# A1, A2, B1 and B2 are the two openers of each session: the problems most
+# people actually reach.  Pooling all four says which domains a competitor is
+# most likely to meet early, which is the useful thing to study by.
+ENTRY_POSITIONS = ("A1", "A2", "B1", "B2")
+
+
+def entry_domain_stats(con):
+    """A1+A2+B1+B2 counts per domain, most common first, with confidences."""
+    return domain_stats(con.execute(
+        "SELECT t.topic, t.domain, t.confidence "
+        "FROM problem_topics t JOIN problems p ON p.id = t.problem_id "
+        "WHERE p.session || p.number IN (?, ?, ?, ?)",
+        ENTRY_POSITIONS,
+    ).fetchall())
+
+
+def domain_stats(rows):
+    """Aggregate {topic, domain, confidence} rows into the ranked table."""
+    buckets = {}
+    for row in rows:
+        bucket = buckets.setdefault(row["domain"], {"topic": row["topic"], "confidences": []})
+        bucket["confidences"].append(row["confidence"])
+
+    out = []
+    for domain, bucket in buckets.items():
+        confidences = bucket["confidences"]
+        out.append({
+            "domain": domain,
+            "topic": bucket["topic"],
+            "count": len(confidences),
+            "mean_confidence": sum(confidences) / len(confidences),
+            "min_confidence": min(confidences),
+            "max_confidence": max(confidences),
+        })
+    out.sort(key=lambda r: (-r["count"], -r["mean_confidence"], r["domain"]))
+    return out
+
+
+def format_entry_stats(stats):
+    if not stats:
+        return "no classified A1/A2/B1/B2 problems yet"
+
+    total = sum(r["count"] for r in stats)
+    width = max(len(r["domain"]) for r in stats)
+    lines = [
+        f"A1 + A2 + B1 + B2 by domain  ({total} problems classified)",
+        f"{'domain'.ljust(width)}  count   share   confidence (mean, range)",
+        "-" * (width + 44),
+    ]
+    for row in stats:
+        lines.append(
+            f"{row['domain'].ljust(width)}  {row['count']:5d}  {row['count'] / total:5.1%}"
+            f"   {row['mean_confidence']:.2f}"
+            f"  ({row['min_confidence']:.2f}-{row['max_confidence']:.2f})"
+        )
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # driver
 # --------------------------------------------------------------------------
 
@@ -356,16 +422,24 @@ def main():
     ap.add_argument("--model", default=MODEL, help=f"OpenRouter model (default {MODEL})")
     ap.add_argument("--redo", action="store_true", help="reclassify already-done problems")
     ap.add_argument("--dry-run", action="store_true", help="print results, write nothing")
+    ap.add_argument("--stats", action="store_true",
+                    help="print the A1/A2/B1/B2 domain table and exit")
     ap.add_argument("--db", type=Path, default=DB_PATH)
     args = ap.parse_args()
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        sys.exit("set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys)")
     if not args.db.exists():
         sys.exit(f"{args.db} not found -- run: python3 scrape.py")
 
     con = connect(args.db)
+    if args.stats:
+        print(format_entry_stats(entry_domain_stats(con)))
+        con.close()
+        return
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        sys.exit("set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys)")
+
     todo = eligible(con, year=args.year, redo=args.redo, limit=args.limit)
     if not todo:
         print("nothing to classify")
@@ -373,6 +447,7 @@ def main():
 
     print(f"classifying {len(todo)} problems with {args.model}")
     done = failed = 0
+    fresh = []
     for problem in todo:
         label = f"{problem['year']} {problem['session']}{problem['number']}"
         try:
@@ -383,14 +458,20 @@ def main():
             continue
         if not args.dry_run:
             save(con, problem["id"], record)
+        if f"{problem['session']}{problem['number']}" in ENTRY_POSITIONS:
+            fresh.append(record)
         done += 1
         print(f"  {label:12} {record['domain']} / {', '.join(record['subdomains'])}"
               f"  [{record['proof_method'] or 'no proof tag'}]"
               f"  conf {record['confidence']:.2f}")
 
-    con.close()
     print(f"\nclassified {done}, failed {failed}"
           + ("  (dry run -- nothing written)" if args.dry_run else ""))
+    print()
+    # A dry run writes nothing, so its table has to come from this run alone.
+    stats = domain_stats(fresh) if args.dry_run else entry_domain_stats(con)
+    print(format_entry_stats(stats))
+    con.close()
 
 
 if __name__ == "__main__":

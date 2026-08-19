@@ -1,5 +1,7 @@
 # Putnam study guide
 
+Drawn from the 372 problems the archive publishes a solution for (1995 onwards), classified from that solution.
+
 Ranked from 372 classified problems, 124 of them in the four entry positions A1, A2, B1 and B2.
 
 - **entry** -- appearances among A1/A2/B1/B2, the problems you will reach

@@ -75,16 +75,30 @@ CREATE TABLE IF NOT EXISTS problem_topics (
     proof_method TEXT,               -- NULL when the model said none
     confidence   REAL NOT NULL,      -- 0..1
     reasoning    TEXT,
+    basis        TEXT NOT NULL DEFAULT 'archive',   -- 'archive' | 'model'
+    attempt      TEXT,               -- the model's own solution, for 'model' rows
     model        TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 )
 """
+
+# What the classification was read from.  The archive has solutions back to
+# 1995 only, so the earlier years are filed from a solution the model worked
+# out itself -- worth keeping apart, since it can be wrong in a way a
+# published solution cannot.
+ARCHIVE = "archive"
+MODEL_SOLVED = "model"
 
 
 def connect(db_path=DB_PATH):
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     con.execute(SCHEMA)
+    have = {r["name"] for r in con.execute("PRAGMA table_info(problem_topics)")}
+    for column, spec in (("basis", "TEXT NOT NULL DEFAULT 'archive'"),
+                         ("attempt", "TEXT")):
+        if column not in have:                      # table predates the columns
+            con.execute(f"ALTER TABLE problem_topics ADD COLUMN {column} {spec}")
     con.commit()
     return con
 
@@ -129,12 +143,12 @@ def smoke_sample(con, seed=None):
     return head + sorted(tail, key=lambda p: (-p["year"], p["session"], p["number"]))
 
 
-def save(con, problem_id, record):
+def save(con, problem_id, record, model=MODEL):
     con.execute(
         "INSERT OR REPLACE INTO problem_topics "
         "(problem_id, topic, description, domain, subdomains, proof_method, "
-        " confidence, reasoning, model, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?, datetime('now'))",
+        " confidence, reasoning, basis, attempt, model, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))",
         (
             problem_id,
             record["topic"],
@@ -144,7 +158,9 @@ def save(con, problem_id, record):
             record["proof_method"],
             record["confidence"],
             record.get("reasoning"),
-            MODEL,
+            record.get("basis", ARCHIVE),
+            record.get("attempt"),
+            model,
         ),
     )
     con.commit()
@@ -324,9 +340,9 @@ def represent(problem, api_key, model=MODEL):
 # --------------------------------------------------------------------------
 
 CLASSIFY_SYSTEM = """You are a Putnam problem archivist filing a problem into a \
-fixed taxonomy. You are given the problem, its official solution and answer, and \
-a representation of it (a topic and a description of what it is about and how it \
-is solved) produced by an earlier pass.
+fixed taxonomy. You are given the problem, {provenance}, and a representation of \
+it (a topic and a description of what it is about and how it is solved) produced \
+by an earlier pass.
 
 The topic is already settled. Your job is the level below it.
 
@@ -368,7 +384,17 @@ Reply with JSON only:
   "reasoning": "<one sentence>"}}"""
 
 
-def classify_one(problem, topic, description, api_key, model=MODEL):
+ARCHIVE_PROVENANCE = "its official solution and answer"
+
+MODEL_PROVENANCE = (
+    "a solution and answer worked out by another model rather than taken from "
+    "the official archive, which means it may be incomplete or wrong"
+)
+
+
+def classify_one(problem, topic, description, api_key, model=MODEL,
+                 solution=None, provenance=ARCHIVE_PROVENANCE,
+                 solution_label="SOLUTION AND ANSWER"):
     domains = domains_of(topic)
     subs = "\n".join(
         f"  {d}:\n" + "\n".join(f"    - {s}" for s in subdomains_of(topic, d))
@@ -381,13 +407,14 @@ def classify_one(problem, topic, description, api_key, model=MODEL):
         methods="\n".join(f"- {m}" for m in PROOF_METHODS),
         max_subs=MAX_SUBDOMAINS,
         outline=topic_outline(),
+        provenance=provenance,
     )
     user = (
         f"TOPIC: {topic}\n\n"
         f"DESCRIPTION: {description}\n\n"
         f"PROBLEM ({problem['year']} {problem['session']}{problem['number']}):\n"
         f"{problem['problem_tex']}\n\n"
-        f"SOLUTION AND ANSWER:\n{problem['solution_tex']}"
+        f"{solution_label}:\n{problem['solution_tex'] if solution is None else solution}"
     )
     out = ask(system, user, api_key, model)
 
@@ -461,14 +488,18 @@ ENTRY_POSITIONS = ("A1", "A2", "B1", "B2")
 TOP_SUBDOMAINS = 3
 
 
-def entry_rows(con):
-    """One row per classified A1/A2/B1/B2 problem, shaped like a fresh record."""
-    rows = con.execute(
-        "SELECT t.topic, t.domain, t.subdomains, t.confidence "
-        "FROM problem_topics t JOIN problems p ON p.id = t.problem_id "
-        "WHERE p.session || p.number IN (?, ?, ?, ?)",
-        ENTRY_POSITIONS,
-    ).fetchall()
+def entry_rows(con, basis=None):
+    """One row per classified A1/A2/B1/B2 problem, shaped like a fresh record.
+
+    `basis` narrows to the archive-solved or the model-solved half."""
+    sql = ("SELECT t.topic, t.domain, t.subdomains, t.confidence "
+           "FROM problem_topics t JOIN problems p ON p.id = t.problem_id "
+           "WHERE p.session || p.number IN (?, ?, ?, ?)")
+    args = list(ENTRY_POSITIONS)
+    if basis:
+        sql += " AND t.basis = ?"
+        args.append(basis)
+    rows = con.execute(sql, args).fetchall()
     return [{"topic": r["topic"], "domain": r["domain"],
              "subdomains": json.loads(r["subdomains"]), "confidence": r["confidence"]}
             for r in rows]

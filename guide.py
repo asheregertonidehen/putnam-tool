@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Turn the classifications into a study guide, ranked all the way down.
 
-    python3 guide.py            # writes STUDY_GUIDE.md
+    python3 guide.py                 # STUDY_GUIDE.md        archive solutions
+    python3 guide.py --basis model   # STUDY_GUIDE_HOLE.md   model solutions
+    python3 guide.py --basis all     # STUDY_GUIDE_TOTAL.md  both together
+    python3 guide.py --all           # all three
 
 Topics ordered by how often they appear, each topic's domains ordered inside
 it, each domain's sub-domains ordered inside that.  Two counts sit next to
@@ -18,25 +21,40 @@ tag, so a problem filed under two sub-domains is counted in both and a
 domain's sub-domain counts can add up past its problem count.
 """
 
+import argparse
 import json
 import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from classify import DB_PATH, ENTRY_POSITIONS
+from classify import ARCHIVE, DB_PATH, ENTRY_POSITIONS, MODEL_SOLVED
 from taxonomy import DOMAINS, PROOF_METHODS, SUBDOMAINS, TAXONOMY
 
-OUT_PATH = Path(__file__).with_name("STUDY_GUIDE.md")
+# basis -> (file, what the sheet is drawn from)
+SHEETS = {
+    ARCHIVE: ("STUDY_GUIDE.md",
+              "the 372 problems the archive publishes a solution for (1995 onwards), "
+              "classified from that solution"),
+    MODEL_SOLVED: ("STUDY_GUIDE_HOLE.md",
+                   "the 120 problems the archive has no solution for (1985-1994), "
+                   "classified from a solution the model worked out itself -- "
+                   "unverified, and wrong somewhere"),
+    "all": ("STUDY_GUIDE_TOTAL.md",
+            "every classified problem, archive-solved and model-solved together"),
+}
 
 
-def load(db_path=DB_PATH):
+def load(db_path=DB_PATH, basis="all"):
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
-    rows = [dict(r) for r in con.execute(
-        "SELECT p.session || p.number AS pos, t.topic, t.domain, t.subdomains, "
-        "       t.proof_method "
-        "FROM problem_topics t JOIN problems p ON p.id = t.problem_id"
-    )]
+    sql = ("SELECT p.session || p.number AS pos, t.topic, t.domain, t.subdomains, "
+           "       t.proof_method "
+           "FROM problem_topics t JOIN problems p ON p.id = t.problem_id")
+    args = []
+    if basis != "all":
+        sql += " WHERE t.basis = ?"
+        args.append(basis)
+    rows = [dict(r) for r in con.execute(sql, args)]
     con.close()
     for row in rows:
         row["subdomains"] = json.loads(row["subdomains"])
@@ -61,7 +79,7 @@ def rank(pairs, names):
                                         -pairs.get(n, (0, 0))[1], n))
 
 
-def build(rows):
+def build(rows, basis="all"):
     topics = counts(rows, lambda r: [r["topic"]])
     domains = counts(rows, lambda r: [r["domain"]])
     subs = counts(rows, lambda r: r["subdomains"])
@@ -70,6 +88,8 @@ def build(rows):
     entry_total = sum(1 for r in rows if r["entry"])
     out = [
         "# Putnam study guide",
+        "",
+        f"Drawn from {SHEETS[basis][1]}.",
         "",
         f"Ranked from {len(rows)} classified problems, {entry_total} of them in the "
         "four entry positions A1, A2, B1 and B2.",
@@ -164,10 +184,24 @@ def check(rows):
     return len(entry), problems
 
 
-if __name__ == "__main__":
-    rows = load()
+def write(basis, db_path=DB_PATH):
+    name, _ = SHEETS[basis]
+    rows = load(db_path, basis)
     if not rows:
-        raise SystemExit("nothing classified yet -- run: python3 classify.py")
+        print(f"{name}: nothing classified on this basis yet -- skipped")
+        return
     entry, problems = check(rows)
-    OUT_PATH.write_text(build(rows))
-    print(f"{OUT_PATH.name}: {problems} problems, {entry} in entry positions")
+    Path(__file__).with_name(name).write_text(build(rows, basis))
+    print(f"{name}: {problems} problems, {entry} in entry positions")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--basis", choices=list(SHEETS), default=ARCHIVE,
+                    help="which population to rank (default archive)")
+    ap.add_argument("--all", action="store_true", help="write all three sheets")
+    ap.add_argument("--db", type=Path, default=DB_PATH)
+    args = ap.parse_args()
+
+    for basis in (list(SHEETS) if args.all else [args.basis]):
+        write(basis, args.db)
